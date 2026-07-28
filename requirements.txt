@@ -1,0 +1,11 @@
+flask>=3.0
+flask-cors>=4.0
+pyyaml>=6.0
+ruamel.yaml>=0.18
+pywebview>=5.0
+# pywebview winforms 后端依赖链（Windows 桌面窗口）
+cffi>=1.16
+typing_extensions>=4.0
+# 打包工具（开发用，运行时不需要）
+pyinstaller>=6.0
+packaging>=23.0
