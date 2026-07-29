@@ -116,9 +116,17 @@ python -m venv .venv
 - **共享库位置**：`<程序所在目录>/AAAHermesHub/shared-skills/<category>/<skill_name>/`
 - **抽取到共享库**：将 skill 复制到共享库，原位置替换为 junction（本地版本移到 `.trash/` 可恢复）
 - **一键抽取**：技能子标签工具栏「📦 一键抽取」→ 按来源类型勾选（内置 / 内置→用户 / 自定义）→ 批量抽取
-- **从共享库引用**：点击"🔗 共享库"按钮，选择 skill 引用到当前 profile（创建 junction）
+- **从共享库引用**：点击"🔗 共享库"按钮，搜索并选择 skill 引用到当前 profile（创建 junction）
 - **解除共享**：在共享技能详情页点击"解除共享"，删除 junction 并复制独立副本回 profile
+- **从共享库删除**：共享库弹窗中点击「删除」→ 移到 `shared-skills/.trash/`（可恢复），各引用 profile 获得独立副本
 - **共同进化**：修改共享库中的 skill 时，所有通过 junction 引用的 profile 同步生效
+
+### 共享库弹窗
+
+- **搜索**：实时过滤技能名称、描述、分类（不区分大小写）
+- **引用计数**：每个 skill 显示蓝色「N 引用」徽章
+- **冲突检测**：当前 profile 已有的 skill 显示黄色「已存在」标签
+- **删除**：每条右侧「删除」按钮，弹窗确认后执行
 
 ### 抽取时的冲突处理
 
@@ -128,6 +136,15 @@ python -m venv .venv
 | 同名 + 内容**相同** | 自动合并：本地移到 `.trash/`，建 junction（共享库不动） |
 | 同名 + 内容**不同** | 弹窗提示「跳过 / 替换为共享库版本」；替换时本地移到 `.trash/`，建 junction |
 | 该技能已是 junction | 跳过（包括分类级 junction 下的技能） |
+
+### 删除行为
+
+| 操作 | skill 类型 | 行为 |
+|------|-----------|------|
+| 技能详情页「删除」 | **共享 skill** (junction) | 仅删除当前 profile 的 junction，**共享库内容和其他 profile 不受影响** |
+| 技能详情页「删除」 | **非共享 skill** | 移到 `<profile>/skills/.trash/`（可恢复） |
+| 技能详情页「删除」 | **内置 skill** | 禁止（返回 403） |
+| 共享库弹窗「删除」 | — | 共享库 skill 移到 `shared-skills/.trash/`，各引用 profile 获得独立副本 |
 
 ### 分类级 junction
 
@@ -163,5 +180,6 @@ python -m venv .venv
 1. **时间戳备份**：`<profile>/.backups/<file>_<YYYYMMDD_HHMMSS>.<ext>`
 2. **一键备份**：`<程序所在目录>/AAAHermesHub/backups/<YYYYMMDD_HHMMSS>/<profile>/`（含 config.yaml + .env）
 3. **删除的 profile**：`profiles/.trash/<profile_name>/`
-4. **抽取/删除的技能**：`<profile>/skills/.trash/<skill_name>_<YYYYMMDD_HHMMSS>/`（抽取到共享库时本地版本移到这里）
-5. **操作日志**：`<程序所在目录>/AAAHermesHub/logs/operations.log`（JSONL，含每条操作的 `.trash/` 路径，可用于定位恢复）
+4. **抽取/删除的 profile 技能**：`<profile>/skills/.trash/<skill_name>_<YYYYMMDD_HHMMSS>/`（抽取到共享库或删除时移到这里）
+5. **从共享库删除的技能**：`<程序所在目录>/AAAHermesHub/shared-skills/.trash/<skill_name>_<YYYYMMDD_HHMMSS>/`
+6. **操作日志**：`<程序所在目录>/AAAHermesHub/logs/operations.log`（JSONL，含每条操作的 `.trash/` 路径，可用于定位恢复）

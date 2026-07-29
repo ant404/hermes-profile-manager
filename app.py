@@ -218,6 +218,69 @@ def get_skills_dir(profile_name):
     return get_profile_path(profile_name) / "skills"
 
 
+def _read_usage_json(skills_dir):
+    """读取 skills 目录下的 .usage.json，返回 dict。文件不存在或格式错误时返回 {}。"""
+    fp = Path(skills_dir) / ".usage.json"
+    if not fp.exists():
+        return {}
+    try:
+        return json.loads(fp.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_usage_json(skills_dir, data):
+    """写入 .usage.json 到 skills 目录。"""
+    fp = Path(skills_dir) / ".usage.json"
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(fp, json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def _usage_key(skill_name, category=""):
+    """构造 .usage.json 的键：分类存在时用 category/skill_name，否则用 skill_name。"""
+    return f"{category}/{skill_name}" if category else skill_name
+
+
+def _add_skill_usage(profile_name, skill_name, category=""):
+    """在 profile 的 .usage.json 中添加 skill 条目（已存在则不覆盖）。"""
+    skills_dir = get_skills_dir(profile_name)
+    usage = _read_usage_json(skills_dir)
+    key = _usage_key(skill_name, category)
+    if key not in usage:
+        now = datetime.now().astimezone().isoformat()
+        usage[key] = {
+            "archived_at": None,
+            "created_at": now,
+            "created_by": None,
+            "last_patched_at": None,
+            "last_used_at": now,
+            "last_viewed_at": now,
+            "patch_count": 0,
+            "pinned": False,
+            "state": "active",
+            "use_count": 0,
+            "view_count": 0,
+        }
+        _write_usage_json(skills_dir, usage)
+
+
+def _remove_skill_usage(profile_name, skill_name, category=""):
+    """从 profile 的 .usage.json 中移除 skill 条目。"""
+    skills_dir = get_skills_dir(profile_name)
+    usage = _read_usage_json(skills_dir)
+    key = _usage_key(skill_name, category)
+    changed = False
+    if key in usage:
+        del usage[key]
+        changed = True
+    # 同时尝试用纯 skill_name 移除（兼容旧数据无分类前缀的情况）
+    if skill_name in usage:
+        del usage[skill_name]
+        changed = True
+    if changed:
+        _write_usage_json(skills_dir, usage)
+
+
 def read_file_safe(path):
     try:
         if not path.exists():
@@ -402,6 +465,8 @@ def _scan_skills_dir(skills_dir, source):
     if not skills_dir.exists():
         return []
     skills = []
+    # 读取 .usage.json（仅 user 目录有）
+    usage_data = _read_usage_json(skills_dir) if source == "user" else {}
     # 用 os.walk 安全收集 SKILL.md（onerror 跳过失效 junction）
     skill_mds = []
     for root, dirs, files in os.walk(skills_dir, onerror=lambda e: None):
@@ -443,11 +508,16 @@ def _scan_skills_dir(skills_dir, source):
                     is_shared = True
                     break
                 current = current.parent
+        # 从 .usage.json 读取启用状态
+        cat = path_category or fm_category
+        usage_key = _usage_key(d.name, cat)
+        usage_entry = usage_data.get(usage_key) or usage_data.get(d.name, {})
+        skill_state = usage_entry.get("state", "active") if usage_entry else "active"
         skills.append({
             "name": d.name,
             "description": meta.get("description", ""),
             "version": meta.get("version", ""),
-            "category": path_category or fm_category,
+            "category": cat,
             "path": str(d),
             "skill_md_path": str(skill_md),
             "content_size": len(content),
@@ -456,6 +526,7 @@ def _scan_skills_dir(skills_dir, source):
             "modified": datetime.fromtimestamp(d.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
             "source": "shared" if is_shared else source,
             "location": source,  # 物理位置：user=在profile/skills/，builtin=在hermes-agent/skills/
+            "enabled": skill_state == "active",
         })
     return skills
 
@@ -497,10 +568,8 @@ def list_skills(profile_name):
         else:
             s["source"] = "custom"
         result.append(s)
-    for s in builtin:
-        # builtin 技能：被 user 同名覆盖则跳过（去重）
-        if s["name"].lower() not in user_names:
-            result.append(dict(s))  # 浅拷贝避免污染缓存
+    # 只展示 profile/skills 目录中实际存在的 skill，不追加未安装的内置技能
+    # （删除后即从列表消失，避免"删除变内置"问题；内置技能通过技能中心安装）
     return result
 
 
@@ -872,6 +941,24 @@ def api_save_skill_file(profile_name, skill_name, file_path):
     return jsonify(resp)
 
 
+def _cleanup_empty_parent(skill_dir, skills_dir):
+    """删除 skill 后检查父目录（分类目录）是否为空，为空则清理。
+    只清理 skills_dir 的直接子目录（分类目录），不递归向上清理。
+    跳过 junction 和含隐藏文件（.trash 等）的目录。"""
+    try:
+        parent = Path(skill_dir).parent
+        if parent == skills_dir or parent.parent != skills_dir:
+            return  # 不是分类目录（是 skills_dir 本身或更深层）
+        if _is_junction(parent):
+            return  # 分类级 junction，不删
+        # 检查是否为空（忽略 . 开头的隐藏文件/目录）
+        remaining = [p for p in parent.iterdir() if not p.name.startswith(".")]
+        if not remaining:
+            shutil.rmtree(str(parent))
+    except Exception:
+        pass
+
+
 @app.route("/api/profile/<profile_name>/skills/<skill_name>", methods=["DELETE"])
 def api_delete_skill(profile_name, skill_name):
     if profile_name not in get_profile_names():
@@ -883,13 +970,50 @@ def api_delete_skill(profile_name, skill_name):
         return jsonify({"error": "skill not found"}), 404
     if source == "builtin":
         return jsonify({"error": "内置 skill 只读，不可删除"}), 403
-    # 移到 .trash
-    trash = skill_dir.parent / ".trash"
-    trash.mkdir(exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    dest = trash / f"{skill_name}_{ts}"
-    shutil.move(str(skill_dir), str(dest))
-    _log_operation("delete_skill", profile=profile_name, skill=skill_name, trash=str(dest))
+    skills_dir = get_skills_dir(profile_name)
+    # 检查祖先是否为 junction（分类级共享引用）：
+    # 此时 skill_dir 实际在共享库内，直接 rmtree 会删共享库内容。
+    # 删除整个分类 junction（不影响共享库），而非单个子 skill。
+    current = Path(skill_dir).parent
+    while current != skills_dir and current.parent != current:
+        if _is_junction(current):
+            try:
+                cat_name = current.name
+                _remove_junction(str(current))
+            except Exception as e:
+                _log_operation("delete_skill", result="error", profile=profile_name, skill=skill_name, error=str(e))
+                return jsonify({"error": f"删除分类共享引用失败: {e}"}), 500
+            _log_operation("delete_skill", profile=profile_name, skill=skill_name, shared=True,
+                           detail=f"删除分类级 junction '{cat_name}'（共享库内容未动）")
+            # 同步 .usage.json：移除该分类下所有子 skill 的条目
+            _remove_skill_usage(profile_name, skill_name, cat_name)
+            return jsonify({"ok": True, "shared": True, "category_junction": cat_name,
+                            "message": f"'{skill_name}' 属于分类级共享引用 '{cat_name}'，已删除整个分类引用（共享库内容未删除）"})
+        current = current.parent
+    # 获取 skill 的分类（用于 .usage.json 键）
+    try:
+        rel = Path(skill_dir).relative_to(skills_dir)
+        del_category = "/".join(rel.parts[:-1]) if len(rel.parts) > 1 else ""
+    except ValueError:
+        del_category = ""
+    # 共享 skill（junction）：只删除 junction，不影响共享库内容
+    if _is_junction(skill_dir):
+        try:
+            _remove_junction(str(skill_dir))
+        except Exception as e:
+            _log_operation("delete_skill", result="error", profile=profile_name, skill=skill_name, error=str(e))
+            return jsonify({"error": f"删除共享引用失败: {e}"}), 500
+        _cleanup_empty_parent(skill_dir, skills_dir)
+        _remove_skill_usage(profile_name, skill_name, del_category)
+        _log_operation("delete_skill", profile=profile_name, skill=skill_name, shared=True,
+                       detail="仅删除 junction，共享库内容未动")
+        return jsonify({"ok": True, "shared": True,
+                        "message": f"已删除共享引用 '{skill_name}'（共享库内容未删除，其他 profile 不受影响）"})
+    # 非共享 skill：直接删除
+    shutil.rmtree(str(skill_dir))
+    _cleanup_empty_parent(skill_dir, skills_dir)
+    _remove_skill_usage(profile_name, skill_name, del_category)
+    _log_operation("delete_skill", profile=profile_name, skill=skill_name)
     return jsonify({"ok": True})
 
 
@@ -917,6 +1041,7 @@ def api_copy_skill(profile_name, skill_name):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         shutil.move(str(dst), trash / f"{skill_name}_{ts}")
     shutil.copytree(src, dst)
+    _add_skill_usage(profile_name, skill_name)
     _log_operation("copy_skill", profile=profile_name, skill=skill_name, source_profile=source_profile, source=src_source)
     return jsonify({"ok": True, "source": src_source})
 
@@ -956,10 +1081,69 @@ def api_copy_skill_to(profile_name, skill_name):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         shutil.move(str(src_user), trash / f"{skill_name}_{ts}")
         moved = True
+    _add_skill_usage(target_profile, skill_name)
+    if moved:
+        _remove_skill_usage(profile_name, skill_name)
     _log_operation("copy_skill_to", profile=profile_name, skill=skill_name,
                    target_profile=target_profile, move=moved, source=src_source)
     return jsonify({"ok": True, "moved": moved, "target_profile": target_profile,
                      "source": src_source})
+
+
+@app.route("/api/profile/<profile_name>/skills/<skill_name>/state", methods=["PUT"])
+def api_set_skill_state(profile_name, skill_name):
+    """切换 skill 的启用/禁用状态（写入 .usage.json 的 state 字段）。
+    body: {enabled: true/false}"""
+    if profile_name not in get_profile_names():
+        return jsonify({"error": "profile not found"}), 404
+    if not _validate_skill_name(skill_name):
+        return jsonify({"error": "invalid skill name"}), 400
+    data = request.get_json() or {}
+    enabled = bool(data.get("enabled", True))
+    # 查找 skill 目录以获取分类
+    skill_dir, source = _resolve_skill_dir(profile_name, skill_name)
+    if not skill_dir:
+        return jsonify({"error": "skill not found"}), 404
+    skills_dir = get_skills_dir(profile_name)
+    category = ""
+    try:
+        rel = Path(skill_dir).relative_to(skills_dir)
+        category = "/".join(rel.parts[:-1]) if len(rel.parts) > 1 else ""
+    except ValueError:
+        pass
+    # 更新 .usage.json
+    usage = _read_usage_json(skills_dir)
+    key = _usage_key(skill_name, category)
+    now = datetime.now().astimezone().isoformat()
+    if key not in usage:
+        # 兼容旧数据：尝试纯 skill_name
+        if skill_name in usage:
+            key = skill_name
+        else:
+            usage[key] = {
+                "archived_at": None,
+                "created_at": now,
+                "created_by": None,
+                "last_patched_at": None,
+                "last_used_at": now,
+                "last_viewed_at": now,
+                "patch_count": 0,
+                "pinned": False,
+                "state": "active",
+                "use_count": 0,
+                "view_count": 0,
+            }
+    entry = usage[key]
+    if enabled:
+        entry["state"] = "active"
+        entry["archived_at"] = None
+    else:
+        entry["state"] = "archived"
+        entry["archived_at"] = now
+    _write_usage_json(skills_dir, usage)
+    _log_operation("set_skill_state", profile=profile_name, skill=skill_name,
+                   enabled=enabled, category=category)
+    return jsonify({"ok": True, "enabled": enabled})
 
 
 @app.route("/api/poll")
@@ -995,20 +1179,35 @@ def _find_skill_dir_in(base_dir, skill_name):
 @app.route("/api/skills/shared/list")
 def api_shared_list():
     """列出共享技能库（AAAHermesHub/shared-skills/）里的所有 skill，
-    并统计每个 skill 被多少 profile 引用（junction）"""
+    并统计每个 skill 被多少 profile 引用（junction）。
+    同时返回分类目录信息，支持分类级引用。"""
     if not SHARED_SKILLS_DIR.exists():
-        return jsonify({"skills": []})
+        return jsonify({"skills": [], "categories": []})
     skills = []
-    # 收集所有 profile 的 junction 引用（支持嵌套分类）
-    ref_counts = {}
+    # 收集所有 profile 的 junction 引用
+    # skill_ref_counts: skill 名 → 引用数（skill 级 junction）
+    # cat_ref_counts: 分类名 → 引用数（分类级 junction，目录本身是 junction 但无 SKILL.md）
+    skill_ref_counts = {}
+    cat_ref_counts = {}
     for pname in get_profile_names():
         sdir = get_skills_dir(pname)
         if not sdir.exists():
             continue
         for d in sdir.rglob("*"):
-            if d.is_dir() and _is_junction(d) and (d / "SKILL.md").exists():
-                ref_counts[d.name] = ref_counts.get(d.name, 0) + 1
+            if not (d.is_dir() and _is_junction(d)):
+                continue
+            if (d / "SKILL.md").exists():
+                skill_ref_counts[d.name] = skill_ref_counts.get(d.name, 0) + 1
+            else:
+                # 分类级 junction：目录是 junction 但无 SKILL.md，子目录有 SKILL.md
+                try:
+                    has_sub = any((d / sub / "SKILL.md").exists() for sub in os.listdir(d))
+                except Exception:
+                    has_sub = False
+                if has_sub:
+                    cat_ref_counts[d.name] = cat_ref_counts.get(d.name, 0) + 1
     # 扫描共享库（支持 category/skill_name 嵌套）
+    categories = {}  # category → info
     for skill_md in sorted(SHARED_SKILLS_DIR.rglob("SKILL.md")):
         d = skill_md.parent
         rel = d.relative_to(SHARED_SKILLS_DIR)
@@ -1024,9 +1223,20 @@ def api_shared_list():
             "category": category,
             "description": meta.get("description", ""),
             "modified": datetime.fromtimestamp(d.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
-            "ref_count": ref_counts.get(d.name, 0),
+            "ref_count": skill_ref_counts.get(d.name, 0),
         })
-    return jsonify({"skills": skills})
+        if category:
+            if category not in categories:
+                categories[category] = {"name": category, "skills": [], "ref_count": 0}
+            categories[category]["skills"].append(d.name)
+    # 填充分类引用计数和子 skill 数
+    for cat_info in categories.values():
+        cat_info["ref_count"] = cat_ref_counts.get(cat_info["name"], 0)
+        cat_info["skill_count"] = len(cat_info["skills"])
+    return jsonify({
+        "skills": skills,
+        "categories": sorted(categories.values(), key=lambda c: c["name"]),
+    })
 
 
 def _skill_content_hash(p):
@@ -1153,20 +1363,49 @@ def api_shared_extract():
 @app.route("/api/skills/shared/link", methods=["POST"])
 def api_shared_link():
     """从共享库引用 skill 到 profile（创建 junction）。
-    body: {profile, skill_name}
+    body: {profile, skill_name, link_category?}
+    - link_category=true: 引用整个分类目录（分类级 junction），所有子 skill 同步可用
+    - 默认: 引用单个 skill（skill 级 junction）
     保留分类结构：shared-skills/security/X → skills/security/X"""
     data = request.get_json() or {}
     profile = data.get("profile")
     skill_name = data.get("skill_name")
+    link_category = data.get("link_category", False)
     if not profile or profile not in get_profile_names():
         return jsonify({"error": "invalid profile"}), 400
     if not _validate_skill_name(skill_name):
         return jsonify({"error": "invalid skill name"}), 400
-    # 在共享库中查找（支持嵌套分类）
+    if link_category:
+        # 分类级引用：shared-skills/<category>/ → profile/skills/<category>/
+        shared_dir = SHARED_SKILLS_DIR / skill_name
+        if not shared_dir.exists() or not shared_dir.is_dir():
+            return jsonify({"error": f"共享库中不存在分类 '{skill_name}'"}), 404
+        try:
+            has_sub = any((shared_dir / sub / "SKILL.md").exists() for sub in os.listdir(shared_dir))
+        except Exception:
+            has_sub = False
+        if not has_sub:
+            return jsonify({"error": f"'{skill_name}' 不是分类目录（无子 skill）"}), 400
+        target = get_skills_dir(profile) / skill_name
+        if target.exists():
+            return jsonify({"error": "conflict", "message": f"分类 '{skill_name}' 已存在于 {profile}，请先删除或重命名"}), 409
+        try:
+            _create_junction(str(target), str(shared_dir))
+        except Exception as e:
+            _log_operation("link_shared", result="error", profile=profile, skill=skill_name, error=str(e))
+            return jsonify({"error": f"引用分类失败: {e}"}), 500
+        sub_count = sum(1 for sub in os.listdir(shared_dir) if (shared_dir / sub / "SKILL.md").exists())
+        # 为分类下所有子 skill 添加 .usage.json 条目
+        for sub in os.listdir(shared_dir):
+            if (shared_dir / sub / "SKILL.md").exists():
+                _add_skill_usage(profile, sub, skill_name)
+        _log_operation("link_shared", profile=profile, skill=skill_name,
+                       shared_dir=str(shared_dir), target=str(target), category_level=True)
+        return jsonify({"ok": True, "message": f"已引用分类 '{skill_name}'（{sub_count} 个子 skill）到 {profile}"})
+    # 单个 skill 引用（原有逻辑）
     shared_dir, category = _find_skill_dir_in(SHARED_SKILLS_DIR, skill_name)
     if not shared_dir:
         return jsonify({"error": "共享库中不存在此 skill"}), 404
-    # 目标路径（保留分类结构）
     target = get_skills_dir(profile) / category / skill_name if category else get_skills_dir(profile) / skill_name
     if target.exists():
         return jsonify({"error": "conflict", "message": f"'{skill_name}' 已存在于 {profile}，请先删除或重命名"}), 409
@@ -1176,6 +1415,7 @@ def api_shared_link():
     except Exception as e:
         _log_operation("link_shared", result="error", profile=profile, skill=skill_name, error=str(e))
         return jsonify({"error": f"引用失败: {e}"}), 500
+    _add_skill_usage(profile, skill_name, category)
     _log_operation("link_shared", profile=profile, skill=skill_name,
                    shared_dir=str(shared_dir), target=str(target))
     return jsonify({"ok": True, "message": f"已从共享库引用 '{skill_name}' 到 {profile}（修改共享库内容时同步生效）"})
@@ -1216,7 +1456,7 @@ def api_shared_unlink():
 
 @app.route("/api/skills/shared/delete", methods=["POST"])
 def api_shared_delete():
-    """从共享库删除 skill（会先解除所有 profile 的 junction 引用）。
+    """从共享库删除 skill：移到 .trash（可恢复），并为所有引用的 profile 复制独立副本。
     body: {skill_name}"""
     data = request.get_json() or {}
     skill_name = data.get("skill_name")
@@ -1226,24 +1466,32 @@ def api_shared_delete():
     shared_dir, _ = _find_skill_dir_in(SHARED_SKILLS_DIR, skill_name)
     if not shared_dir:
         return jsonify({"error": "共享库中不存在此 skill"}), 404
-    # 解除所有 profile 的 junction（支持嵌套分类）
+    # 解除所有 profile 的 junction，并复制独立副本回 profile
     unlinked = []
     for pname in get_profile_names():
         target, _ = _find_skill_dir_in(get_skills_dir(pname), skill_name)
         if target and _is_junction(target):
             try:
                 _remove_junction(str(target))
+                # 复制独立副本到原位置（profile 不丢失 skill，变为独立版本）
+                shutil.copytree(str(shared_dir), str(target))
                 unlinked.append(pname)
             except Exception:
                 pass
-    # 删除共享库中的 skill
+    # 移到 shared-skills/.trash/（可恢复，不直接删除）
+    trash = SHARED_SKILLS_DIR / ".trash"
+    trash.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = trash / f"{skill_name}_{ts}"
     try:
-        shutil.rmtree(str(shared_dir))
+        shutil.move(str(shared_dir), str(dest))
     except Exception as e:
         _log_operation("delete_shared", result="error", skill=skill_name, error=str(e))
         return jsonify({"error": f"删除共享 skill 失败: {e}"}), 500
-    _log_operation("delete_shared", skill=skill_name, shared_dir=str(shared_dir), unlinked_profiles=unlinked)
-    return jsonify({"ok": True, "message": f"已从共享库删除 '{skill_name}'，并解除了 {len(unlinked)} 个 profile 的引用: {', '.join(unlinked) if unlinked else '无'}"})
+    _log_operation("delete_shared", skill=skill_name, shared_dir=str(dest),
+                   unlinked_profiles=unlinked,
+                   detail=f"移到 .trash/，{len(unlinked)} 个 profile 获得独立副本")
+    return jsonify({"ok": True, "message": f"已从共享库删除 '{skill_name}'（移到 .trash/，可恢复），并为 {len(unlinked)} 个 profile 复制了独立副本: {', '.join(unlinked) if unlinked else '无'}"})
 
 
 @app.route("/api/skills/fix-junctions", methods=["POST"])
@@ -1283,17 +1531,22 @@ import urllib.error as _urlerr
 
 @app.route("/api/profile/<profile_name>/discover-models/<int:cp_index>", methods=["POST"])
 def api_discover_models(profile_name, cp_index):
-    """请求 provider 的 /v1/models 端点获取模型列表"""
+    """请求 provider 的 /v1/models 端点获取模型列表。
+    支持前端直接传入 provider 配置（未保存时也能探测）。"""
     if profile_name not in get_profile_names():
         return jsonify({"error": "profile not found"}), 404
-    fp = get_file_path(profile_name, "config.yaml")
-    data, err = _load_yaml_file(fp)
-    if err or data is None:
-        return jsonify({"error": "cannot load config"}), 500
-    cp_list = data.get("custom_providers", [])
-    if cp_index < 0 or cp_index >= len(cp_list):
-        return jsonify({"error": "invalid provider index"}), 400
-    cp = cp_list[cp_index]
+    body = request.get_json(silent=True) or {}
+    cp = body.get("provider")
+    if not cp:
+        # 回退：从磁盘文件读取
+        fp = get_file_path(profile_name, "config.yaml")
+        data, err = _load_yaml_file(fp)
+        if err or data is None:
+            return jsonify({"error": "cannot load config"}), 500
+        cp_list = data.get("custom_providers", [])
+        if cp_index < 0 or cp_index >= len(cp_list):
+            return jsonify({"error": "invalid provider index"}), 400
+        cp = cp_list[cp_index]
     base_url = str(cp.get("base_url", "")).rstrip("/")
     api_key = str(cp.get("api_key", ""))
     if not base_url:
@@ -2234,7 +2487,7 @@ def api_cleanup_backups():
     if not dirs:
         return jsonify({"ok": True, "deleted": [], "message": "无备份可清理"})
 
-    now = datetime.now()
+    today = datetime.now().date()
     newest = dirs[0]  # 最新的一份，始终保留
     deleted = []
     for d in dirs:
@@ -2245,8 +2498,9 @@ def api_cleanup_backups():
             dt = datetime.strptime(d.name, "%Y%m%d_%H%M%S")
         except ValueError:
             continue
-        age_days = (now - dt).days
-        if age_days > max_age_days:
+        # 用日历日期差（而非 timedelta.days），避免"2天前"因不足48小时而被判为1天
+        age_days = (today - dt.date()).days
+        if age_days >= max_age_days:
             try:
                 shutil.rmtree(d)
                 deleted.append(d.name)

@@ -263,7 +263,9 @@ textarea{width:100%;min-height:100%;background:transparent;color:var(--fg);font-
 .cat-batch-btn:hover{background:var(--yellow-dim);color:var(--yellow);border-color:var(--yellow)}
 .skill-item.nested{padding-left:26px;position:relative}
 .skill-item.nested::before{content:"└";position:absolute;left:12px;color:var(--fg3);font-size:13px;line-height:1}
-.skills-sidebar{width:260px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
+.skills-sidebar{width:260px;min-width:200px;max-width:600px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
+.sidebar-resizer{width:4px;cursor:col-resize;background:transparent;flex-shrink:0;transition:background .15s;z-index:5}
+.sidebar-resizer:hover,.sidebar-resizer.dragging{background:var(--accent)}
 .skills-sidebar-header{padding:10px 14px;font-size:11px;color:var(--fg3);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-weight:600;text-transform:uppercase;letter-spacing:1.2px}
 .skills-search{padding:8px 12px;border-bottom:1px solid var(--border)}
 .skills-search input{width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--fg);font-size:13px;outline:none;transition:var(--transition)}
@@ -276,6 +278,11 @@ textarea{width:100%;min-height:100%;background:transparent;color:var(--fg);font-
 .skill-item .sname{font-weight:600;font-size:13px;display:inline;vertical-align:middle}
 .skill-item .sdesc{font-size:11px;color:var(--fg2);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .skill-item .smeta{font-size:10px;color:var(--fg3);margin-top:4px;display:flex;gap:8px}
+.skill-item.disabled{opacity:.45}
+.skill-toggle{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;font-size:10px;cursor:pointer;margin-right:6px;vertical-align:middle;flex-shrink:0;transition:var(--transition)}
+.skill-toggle.on{color:var(--green)}
+.skill-toggle.off{color:var(--fg3)}
+.skill-toggle:hover{transform:scale(1.2)}
 .skill-editor{flex:1;display:flex;flex-direction:column;overflow:hidden}
 .skill-files-bar{display:flex;gap:2px;padding:6px 12px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;overflow-x:auto;scrollbar-width:none}
 .skill-files-bar::-webkit-scrollbar{display:none}
@@ -678,19 +685,20 @@ async function renderEditor() {
 // ── 未保存守卫 ──
 function hasUnsavedChanges() {
   if (!state.currentProfile) return false;
+  const _dbg = (tag, val) => { if (val) console.warn("[hasUnsavedChanges] triggered:", tag); return val; };
   // config.yaml
   if (state.currentFile === "config.yaml" || state.currentView !== "files") {
-    if (state.configMode === "raw" && state.configRawContent !== state.configRawOriginal) return true;
-    if (isConfigModified()) return true;
+    if (_dbg("config.raw", state.configMode === "raw" && state.configRawContent !== state.configRawOriginal)) return true;
+    if (_dbg("config.form", isConfigModified())) return true;
   }
   // .env
   if (state.currentFile === ".env" || state.currentView !== "files") {
-    if (state.envMode === "raw" && state.envRawContent !== state.envRawOriginal) return true;
-    if (isEnvModified()) return true;
+    if (_dbg("env.raw", state.envMode === "raw" && state.envRawContent !== state.envRawOriginal)) return true;
+    if (_dbg("env.form", isEnvModified())) return true;
   }
   // md files
   for (const fk of ["SOUL.md","MEMORY.md","USER.md"]) {
-    if ((state.fileContents[state.currentProfile]?.[fk]??"") !== (state.originalContents[state.currentProfile]?.[fk]??"")) return true;
+    if (_dbg("md:"+fk, (state.fileContents[state.currentProfile]?.[fk]??"") !== (state.originalContents[state.currentProfile]?.[fk]??""))) return true;
   }
   // skills
   if (state.skillContents[state.currentProfile] && state.skillOriginals[state.currentProfile]) {
@@ -698,7 +706,7 @@ function hasUnsavedChanges() {
       const c = state.skillContents[state.currentProfile][sn];
       const o = state.skillOriginals[state.currentProfile][sn];
       for (const fp of Object.keys(c)) {
-        if (c[fp] !== o[fp]) return true;
+        if (_dbg("skill:"+sn+"/"+fp, c[fp] !== o[fp])) return true;
       }
     }
   }
@@ -1294,7 +1302,9 @@ async function discoverModels(i) {
   if (!btn) return;
   btn.disabled = true; btn.classList.add("loading"); btn.textContent = "探测中...";
   try {
-    const d = await api(`/api/profile/${state.currentProfile}/discover-models/${i}`, "POST");
+    // 直接传当前内存中的 provider 配置，无需先保存
+    const cp = state.configData[state.currentProfile].custom_providers[i] || {};
+    const d = await api(`/api/profile/${state.currentProfile}/discover-models/${i}`, "POST", {provider: cp});
     if (d.models && d.models.length > 0) {
       // 填入 models textarea
       const ta = document.querySelector(`textarea[data-cp-field="models"][data-cp-index="${i}"]`);
@@ -1341,7 +1351,10 @@ async function saveConfig() {
   await withLoading(btn, async () => {
     await api(`/api/profile/${state.currentProfile}/config`, "PUT", {values: cd.values, custom_providers: cd.custom_providers, mcp_servers: cd.mcp_servers || []});
     state.configOriginal[state.currentProfile] = JSON.parse(JSON.stringify(cd));
-    updateConfigSaveState();
+    // 重新渲染表单以清除所有字段的"已修改"黄色边框
+    const fc = document.getElementById("file-content");
+    if (fc && state.configMode === "form") renderConfigForm(fc);
+    else updateConfigSaveState();
     toast("config.yaml 保存成功~","success");
   }).catch(e => toast("保存失败: "+e.message,"error"));
 }
@@ -1484,7 +1497,10 @@ async function saveEnv() {
   await withLoading(btn, async () => {
     await api(`/api/profile/${state.currentProfile}/env`, "PUT", {entries: state.envData[state.currentProfile]});
     state.envOriginal[state.currentProfile] = JSON.parse(JSON.stringify(state.envData[state.currentProfile]));
-    updateEnvSaveState();
+    // 重新渲染表单以清除所有行的"已修改"黄色边框
+    const fc = document.getElementById("file-content");
+    if (fc && state.envMode === "form") loadEnvView(fc);
+    else updateEnvSaveState();
     toast(".env 保存成功~","success");
   }).catch(e => toast("保存失败: "+e.message,"error"));
 }
@@ -1545,11 +1561,12 @@ async function renderSkillsView() {
   const userCnt = skills.filter(s=>s.source==="user").length;
   const customCnt = skills.filter(s=>s.source==="custom").length;
   const sharedCnt = skills.filter(s=>s.source==="shared").length;
+  const enabledCnt = skills.filter(s=>s.enabled!==false).length;
   const p = state.profiles.find(x=>x.name===state.currentProfile) || {};
   const vc = document.getElementById("view-content");
   vc.innerHTML = `
     <div class="skill-subtabs">
-      <div class="skill-subtab ${state.skillSubview==="skills"?"active":""}" data-view="skills" onclick="switchSkillSubview('skills')" title="内置 ${builtinCnt} + 用户 ${userCnt} + 自定义 ${customCnt} + 共享 ${sharedCnt}">技能 <b>${skills.length}</b></div>
+      <div class="skill-subtab ${state.skillSubview==="skills"?"active":""}" data-view="skills" onclick="switchSkillSubview('skills')" title="启用 ${enabledCnt} / 总计 ${skills.length}（内置 ${builtinCnt} + 用户 ${userCnt} + 自定义 ${customCnt} + 共享 ${sharedCnt}）">技能 <b>${enabledCnt}</b><span style="color:var(--fg3);font-size:11px;font-weight:400">/${skills.length}</span></div>
       <div class="skill-subtab ${state.skillSubview==="toolsets"?"active":""}" data-view="toolsets" onclick="switchSkillSubview('toolsets')" title="config.yaml platform_toolsets 启用数 / 注册总数">工具集 <b>${p.toolset_enabled||0}</b><span style="color:var(--fg3);font-size:11px;font-weight:400">/${p.toolset_total||0}</span></div>
       <div class="skill-subtab ${state.skillSubview==="mcp"?"active":""}" data-view="mcp" onclick="switchSkillSubview('mcp')" title="config.yaml mcp_servers 数">MCP <b>${p.mcp_count||0}</b></div>
       <button class="btn" onclick="batchExtractAll()" style="margin-left:auto;height:26px;padding:0 12px;font-size:12px" title="将当前 profile 所有用户技能一键抽取到共享库（原位置替换为 junction）">📦 一键抽取</button>
@@ -1582,17 +1599,44 @@ function renderSkillsSubview() {
   const userCnt = skills.filter(s=>s.source==="user").length;
   const customCnt = skills.filter(s=>s.source==="custom").length;
   const sharedCnt = skills.filter(s=>s.source==="shared").length;
+  const enabledCnt = skills.filter(s=>s.enabled!==false).length;
+  const disabledCnt = skills.length - enabledCnt;
   const container = document.getElementById("skill-subview-container");
   if (!container) return;
   container.innerHTML = `
     <div class="skills-panel">
-      <div class="skills-sidebar">
-        <div class="skills-sidebar-header"><span>${skills.length} Skills</span><span style="font-size:10px;color:var(--fg3);text-transform:none;letter-spacing:0;font-weight:400">内置 ${builtinCnt} + 用户 ${userCnt} + 自定义 ${customCnt} + 共享 ${sharedCnt}</span></div>
+      <div class="skills-sidebar" id="skills-sidebar">
+        <div class="skills-sidebar-header"><span>${enabledCnt}/${skills.length} Skills</span><span style="font-size:10px;color:var(--fg3);text-transform:none;letter-spacing:0;font-weight:400">内置 ${builtinCnt} + 用户 ${userCnt} + 自定义 ${customCnt} + 共享 ${sharedCnt}${disabledCnt?` + 禁用 ${disabledCnt}`:''}</span></div>
         <div class="skills-search"><input id="skill-search" placeholder="搜索 skill..." oninput="filterSkills()"></div>
         <div class="skills-list" id="skills-list"></div>
       </div>
+      <div class="sidebar-resizer" id="sidebar-resizer" title="拖拽调整面板宽度"></div>
       <div class="skill-editor" id="skill-editor"><div class="empty-state"><div class="big">(◕‿◕)</div><div>选择一个 Skill 开始编辑~</div></div></div>
     </div>`;
+  // 恢复上次宽度
+  const savedW = localStorage.getItem("skills-sidebar-width");
+  if (savedW) document.getElementById("skills-sidebar").style.width = savedW + "px";
+  // 拖拽调整宽度
+  const resizer = document.getElementById("sidebar-resizer");
+  const sidebar = document.getElementById("skills-sidebar");
+  let dragging = false, startX = 0, startW = 0;
+  resizer.addEventListener("mousedown", (e) => {
+    dragging = true; startX = e.clientX; startW = sidebar.offsetWidth;
+    resizer.classList.add("dragging"); document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    e.preventDefault();
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const w = Math.max(200, Math.min(600, startW + e.clientX - startX));
+    sidebar.style.width = w + "px";
+  });
+  document.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false; resizer.classList.remove("dragging");
+    document.body.style.cursor = ""; document.body.style.userSelect = "";
+    localStorage.setItem("skills-sidebar-width", sidebar.offsetWidth);
+  });
   renderSkillsList();
 }
 async function renderToolsetsSubview() {
@@ -1954,7 +1998,8 @@ function renderSkillsList() {
   const renderSkillItem = s => {
     const item = document.createElement("div");
     const nested = s.category ? " nested" : "";
-    item.className = `skill-item${nested} ${s.name===state.currentSkill?"active":""}`;
+    const disabledCls = s.enabled === false ? " disabled" : "";
+    item.className = `skill-item${nested}${disabledCls} ${s.name===state.currentSkill?"active":""}`;
     // 来源标签：builtin=内置(紫)，user=内置→用户(绿)，custom=自定义(蓝)，shared=共享(橙)
     const srcTag = s.source === "builtin"
       ? '<span style="font-size:9px;padding:1px 5px;border-radius:6px;background:var(--purple-dim);color:var(--purple);margin-left:6px;font-weight:600">内置</span>'
@@ -1963,8 +2008,18 @@ function renderSkillsList() {
         : s.source === "shared"
           ? '<span style="font-size:9px;padding:1px 5px;border-radius:6px;background:var(--yellow-dim);color:var(--yellow);margin-left:6px;font-weight:600" title="共享技能（junction，修改同步所有引用的 profile）">共享</span>'
           : '<span style="font-size:9px;padding:1px 5px;border-radius:6px;background:var(--accent-dim);color:var(--accent);margin-left:6px;font-weight:600">自定义</span>';
-    item.innerHTML = `<div class="sname">${s.name}${srcTag}</div><div class="sdesc">${s.description||"(no description)"}</div><div class="smeta">${s.version?`<span>v${s.version}</span>`:''}<span>${s.sub_files.length} files</span><span>${s.modified}</span></div>`;
-    item.onclick = () => selectSkill(s.name);
+    // 启用/禁用开关
+    const enabled = s.enabled !== false;
+    const toggle = `<span class="skill-toggle ${enabled?"on":"off"}" data-skill="${s.name}" title="${enabled?"点击禁用":"点击启用"}">${enabled?"●":"○"}</span>`;
+    item.innerHTML = `<div class="sname">${toggle}${s.name}${srcTag}</div><div class="sdesc">${s.description||"(no description)"}</div><div class="smeta">${s.version?`<span>v${s.version}</span>`:''}<span>${s.sub_files.length} files</span><span>${s.modified}</span></div>`;
+    item.onclick = (e) => {
+      if (e.target.classList.contains("skill-toggle")) {
+        e.stopPropagation();
+        toggleSkillState(s.name, !enabled);
+        return;
+      }
+      selectSkill(s.name);
+    };
     return item;
   };
   cats.forEach(cat => {
@@ -1983,6 +2038,11 @@ function renderSkillsList() {
       if (shared.length >= 1) {
         batchBtns += `<button class="cat-batch-btn" onclick="batchUnlinkCategory('${cat}')" title="将该分类下 ${shared.length} 个共享技能全部解除共享">全部解除(${shared.length})</button>`;
       }
+      // 全部删除（排除内置 skill）
+      const deletable = items.filter(s => s.source !== "builtin");
+      if (deletable.length >= 1) {
+        batchBtns += `<button class="cat-batch-btn" style="color:var(--red)" onclick="batchDeleteCategory('${cat}')" title="将该分类下 ${deletable.length} 个技能全部删除（共享 skill 仅删 junction，非共享移到 .trash）">全部删除(${deletable.length})</button>`;
+      }
       header.innerHTML = `<span>📁 ${cat}</span><span class="cat-count">${items.length}</span>${batchBtns}`;
       el.appendChild(header);
     }
@@ -1990,6 +2050,20 @@ function renderSkillsList() {
   });
 }
 function filterSkills() { renderSkillsList(); }
+async function toggleSkillState(skillName, enabled) {
+  try {
+    await api(`/api/profile/${state.currentProfile}/skills/${skillName}/state`, "PUT", {enabled});
+    // 更新本地缓存
+    const skills = state.skills[state.currentProfile] || [];
+    const s = skills.find(x => x.name === skillName);
+    if (s) s.enabled = enabled;
+    renderSkillsList();
+    if (state.currentSkill === skillName) renderSkillEditor();
+    toast(`${skillName} 已${enabled?"启用":"禁用"}`, enabled?"success":"info");
+  } catch(e) {
+    toast(`切换失败: ${e.message}`, "error");
+  }
+}
 async function selectSkill(name) {
   state.currentSkill = name; state.currentSkillFile = "SKILL.md";
   if (!state.skillContents[state.currentProfile]) state.skillContents[state.currentProfile] = {};
@@ -2020,6 +2094,7 @@ async function renderSkillEditor() {
     <div class="raw-toolbar">
       <span class="path" id="skill-path">${isBuiltin?'(内置) ':''}${state.currentProfile}/skills/${state.currentSkill}/${state.currentSkillFile}</span>
       ${skillActions}
+      <button class="btn" onclick="toggleSkillState('${state.currentSkill}', ${skill.enabled===false})" title="${skill.enabled===false?'启用此技能':'禁用此技能'}" style="${skill.enabled===false?'color:var(--red)':'color:var(--green)'}">${skill.enabled===false?'已禁用':'已启用'}</button>
       ${isBuiltin?'':`<button class="btn save" onclick="saveSkillFile()" id="btn-save-skill" disabled>保存</button>`}
     </div>
     <div class="skill-files-bar" id="skill-files-bar"></div>
@@ -2111,13 +2186,28 @@ async function copySkillTo(move) {
 }
 async function deleteSkill() {
   if (!state.currentProfile||!state.currentSkill) return;
+  // 判断当前 skill 是否为共享（junction）
+  const skill = (state.skills[state.currentProfile]||[]).find(s => s.name === state.currentSkill);
+  const isShared = skill && skill.source === "shared";
   const o = document.createElement("div"); o.className = "modal-overlay";
-  o.innerHTML = `<div class="modal"><h3>删除 Skill「${state.currentSkill}」？</h3><p style="font-size:13px;color:var(--fg2)">将移入 .trash/ 目录，可手动恢复</p><div class="modal-actions"><button class="btn cancel">取消</button><button class="btn confirm danger">删除</button></div></div>`;
+  if (isShared) {
+    o.innerHTML = `<div class="modal"><h3>删除共享引用「${state.currentSkill}」？</h3>
+      <p style="font-size:13px;color:var(--fg2);line-height:1.6">此技能是<b style="color:var(--accent)">共享 junction</b>，删除仅移除当前 profile 的引用链接。<br>
+      <b style="color:var(--green)">共享库内容不受影响</b>，其他 profile 的引用也不受影响。</p>
+      <div class="modal-actions"><button class="btn cancel">取消</button><button class="btn confirm danger">删除引用</button></div></div>`;
+  } else {
+    o.innerHTML = `<div class="modal"><h3>删除 Skill「${state.currentSkill}」？</h3><p style="font-size:13px;color:var(--fg2)">此操作不可恢复，技能将被永久删除</p><div class="modal-actions"><button class="btn cancel">取消</button><button class="btn confirm danger">删除</button></div></div>`;
+  }
   document.body.appendChild(o);
   o.querySelector(".cancel").onclick = () => o.remove();
   o.querySelector(".confirm").onclick = async () => {
     o.remove();
-    try { await api(`/api/profile/${state.currentProfile}/skills/${state.currentSkill}`,"DELETE"); state.currentSkill=null; delete state.skills[state.currentProfile]; delete state.skillContents[state.currentProfile]; await renderEditor(); toast("Skill 已删除~","success"); }
+    try {
+      const d = await api(`/api/profile/${state.currentProfile}/skills/${state.currentSkill}`,"DELETE");
+      state.currentSkill=null; delete state.skills[state.currentProfile]; delete state.skillContents[state.currentProfile];
+      await renderEditor();
+      toast(d.message || "Skill 已删除~","success");
+    }
     catch(e) { toast("删除失败: "+e.message,"error"); }
   };
 }
@@ -2204,35 +2294,117 @@ async function showSharedLibraryModal() {
   const m = document.createElement("div"); m.className = "modal-overlay";
   m.innerHTML = `<div class="modal" style="max-width:560px"><h3>🔗 共享技能库</h3>
     <p style="font-size:12px;color:var(--fg3);margin-bottom:12px">共享库位于 <code style="color:var(--accent2)">AAAHermesHub/shared-skills/</code>。引用到当前 profile 后，修改共享库内容会同步所有引用的 profile（共同进化）。</p>
-    <div id="shared-list" style="max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px"></div>
-    <div class="modal-actions"><button class="btn cancel">关闭</button></div></div>`;
+    <input id="shared-search" type="text" class="input" placeholder="🔍 搜索技能名称或描述..." style="width:100%;margin-bottom:8px;box-sizing:border-box">
+    <div id="shared-list" style="max-height:400px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px"></div>
+    <div class="modal-actions"><span id="shared-count" style="font-size:11px;color:var(--fg3);margin-right:auto"></span><button class="btn cancel">关闭</button></div></div>`;
   document.body.appendChild(m);
   m.querySelector(".cancel").onclick = () => m.remove();
   const listEl = m.querySelector("#shared-list");
+  const searchEl = m.querySelector("#shared-search");
+  const countEl = m.querySelector("#shared-count");
   listEl.innerHTML = '<div style="color:var(--fg3);text-align:center;padding:16px">加载中...</div>';
-  try {
-    const d = await api("/api/skills/shared/list");
-    const skills = d.skills || [];
-    if (!skills.length) {
-      listEl.innerHTML = '<div style="color:var(--fg3);text-align:center;padding:24px">共享库为空<br><span style="font-size:11px">在技能详情页点击"抽取到共享库"可将技能加入共享库</span></div>';
+  let allSkills = [];
+  let allCategories = [];
+  function render(filter) {
+    const q = (filter||"").toLowerCase().trim();
+    const skills = q ? allSkills.filter(s =>
+      s.name.toLowerCase().includes(q) || (s.description||"").toLowerCase().includes(q) || (s.category||"").toLowerCase().includes(q)
+    ) : allSkills;
+    const categories = q ? allCategories.filter(c =>
+      c.name.toLowerCase().includes(q) || c.skills.some(sn => sn.toLowerCase().includes(q))
+    ) : allCategories;
+    const topSkills = skills.filter(s => !s.category);
+    const catSkillNames = new Set();
+    categories.forEach(c => c.skills.forEach(s => catSkillNames.add(s)));
+    countEl.textContent = `共 ${skills.length}${q ? ` / ${allSkills.length}` : ""} 个`;
+    if (!skills.length && !categories.length) {
+      listEl.innerHTML = q
+        ? '<div style="color:var(--fg3);text-align:center;padding:24px">没有匹配的技能</div>'
+        : '<div style="color:var(--fg3);text-align:center;padding:24px">共享库为空<br><span style="font-size:11px">在技能详情页点击"抽取到共享库"可将技能加入共享库</span></div>';
       return;
     }
-    // 检查当前 profile 已有哪些 skill（用于判断冲突）
-    const currentSkills = (state.skills[state.currentProfile]||[]).map(s=>s.name.toLowerCase());
-    listEl.innerHTML = skills.map(s => {
-      const conflict = currentSkills.includes(s.name.toLowerCase());
-      return `<div style="border:1px solid ${conflict?'var(--yellow-dim)':'var(--border)'};border-radius:6px;padding:10px;margin-bottom:8px;display:flex;align-items:center;gap:10px">
+    const currentSkillNames = new Set((state.skills[state.currentProfile]||[]).map(s=>s.name.toLowerCase()));
+    const currentCats = new Set((state.skills[state.currentProfile]||[]).filter(s=>s.category).map(s=>s.category.toLowerCase()));
+    let html = '';
+    // 顶层 skill（无分类）
+    topSkills.forEach(s => {
+      const conflict = currentSkillNames.has(s.name.toLowerCase());
+      const refBadge = s.ref_count > 0 ? `<span style="font-size:10px;padding:1px 6px;border-radius:4px;background:var(--accent-dim);color:var(--accent);font-weight:600;white-space:nowrap">${s.ref_count} 引用</span>` : "";
+      html += `<div style="border:1px solid ${conflict?'var(--yellow-dim)':'var(--border)'};border-radius:6px;padding:10px;margin-bottom:8px;display:flex;align-items:center;gap:10px">
         <div style="flex:1">
           <div style="font-weight:600;color:var(--fg);font-size:13px">${s.name}</div>
-          <div style="font-size:11px;color:var(--fg3);margin-top:2px">${s.description||'无描述'} · ${s.ref_count} 个 profile 引用 · ${s.modified}</div>
+          <div style="font-size:11px;color:var(--fg3);margin-top:2px">${s.description||'无描述'} · ${s.modified}</div>
         </div>
-        ${conflict
-          ? '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--yellow-dim);color:var(--yellow);font-weight:600">已存在</span>'
+        ${refBadge}
+        ${conflict ? '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--yellow-dim);color:var(--yellow);font-weight:600;white-space:nowrap">已存在</span>'
           : `<button class="btn" style="font-size:12px;padding:4px 10px" onclick="linkSharedSkill('${s.name}', this)">引用</button>`}
+        <button class="btn danger" style="font-size:11px;padding:3px 8px" onclick="deleteSharedSkill('${s.name}', this)" title="从共享库删除（移到 .trash，各 profile 获得独立副本）">删除</button>
       </div>`;
-    }).join('');
+    });
+    // 分类分组
+    categories.forEach(cat => {
+      const catSkillsFiltered = skills.filter(s => s.category === cat.name);
+      if (catSkillsFiltered.length === 0 && q) return;
+      const catExists = currentCats.has(cat.name.toLowerCase());
+      const catRefBadge = cat.ref_count > 0 ? `<span style="font-size:10px;padding:1px 6px;border-radius:4px;background:var(--accent-dim);color:var(--accent);font-weight:600;white-space:nowrap">${cat.ref_count} 引用</span>` : "";
+      html += `<div style="margin-top:12px;margin-bottom:6px;padding:8px 10px;background:var(--bg2);border-radius:6px;display:flex;align-items:center;gap:8px">
+        <div style="flex:1">
+          <span style="font-weight:700;color:var(--fg);font-size:13px">📁 ${cat.name}</span>
+          <span style="font-size:11px;color:var(--fg3);margin-left:6px">${cat.skill_count} 个子 skill</span>
+        </div>
+        ${catRefBadge}
+        ${catExists
+          ? '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--green-dim);color:var(--green);font-weight:600;white-space:nowrap">已引用</span>'
+          : `<button class="btn" style="font-size:11px;padding:3px 10px" onclick="linkSharedCategory('${cat.name}', this)" title="引用整个分类（分类级 junction，所有子 skill 同步可用）">引用整个分类</button>`}
+      </div>`;
+      catSkillsFiltered.forEach(s => {
+        const conflict = currentSkillNames.has(s.name.toLowerCase());
+        const refBadge = s.ref_count > 0 ? `<span style="font-size:9px;padding:1px 5px;border-radius:4px;background:var(--accent-dim);color:var(--accent);font-weight:600;white-space:nowrap">${s.ref_count} 引用</span>` : "";
+        html += `<div style="border:1px solid ${conflict?'var(--yellow-dim)':'var(--border)'};border-radius:6px;padding:8px 10px;margin-bottom:6px;margin-left:20px;display:flex;align-items:center;gap:8px">
+          <div style="flex:1">
+            <div style="font-weight:600;color:var(--fg);font-size:12px">${s.name}</div>
+            <div style="font-size:10px;color:var(--fg3);margin-top:1px">${s.description||'无描述'}</div>
+          </div>
+          ${refBadge}
+          ${conflict ? '<span style="font-size:9px;padding:2px 6px;border-radius:4px;background:var(--yellow-dim);color:var(--yellow);font-weight:600;white-space:nowrap">已存在</span>'
+            : `<button class="btn" style="font-size:11px;padding:3px 8px" onclick="linkSharedSkill('${s.name}', this)">引用</button>`}
+          <button class="btn danger" style="font-size:10px;padding:2px 6px" onclick="deleteSharedSkill('${s.name}', this)" title="从共享库删除">删除</button>
+        </div>`;
+      });
+    });
+    listEl.innerHTML = html;
+  }
+  searchEl.addEventListener("input", () => render(searchEl.value));
+  try {
+    const d = await api("/api/skills/shared/list");
+    allSkills = d.skills || [];
+    allCategories = d.categories || [];
+    render("");
+    if (allSkills.length) searchEl.focus();
   } catch(e) {
     listEl.innerHTML = `<div style="color:var(--red);padding:16px">加载失败: ${e.message}</div>`;
+  }
+}
+
+async function linkSharedCategory(name, btn) {
+  if (!state.currentProfile) return;
+  btn.classList.add("loading"); btn.disabled = true;
+  try {
+    const d = await api("/api/skills/shared/link","POST",{profile:state.currentProfile,skill_name:name,link_category:true});
+    toast(d.message||`已引用分类 ${name}`,"success");
+    const card = btn.parentElement;
+    if (card) {
+      const badge = document.createElement("span");
+      badge.style.cssText = "font-size:10px;padding:2px 8px;border-radius:4px;background:var(--green-dim);color:var(--green);font-weight:600;white-space:nowrap";
+      badge.textContent = "✓ 已引用";
+      btn.replaceWith(badge);
+    }
+    delete state.skills[state.currentProfile]; delete state.skillContents[state.currentProfile];
+    await renderEditor();
+    showSharedLibraryModal();
+  } catch(e) {
+    btn.classList.remove("loading"); btn.disabled = false;
+    toast("引用分类失败: "+e.message,"error");
   }
 }
 
@@ -2257,6 +2429,33 @@ async function linkSharedSkill(name, btn) {
     btn.classList.remove("loading"); btn.disabled = false;
     toast("引用失败: "+e.message,"error");
   }
+}
+
+async function deleteSharedSkill(name, btn) {
+  // 弹窗确认
+  const o = document.createElement("div"); o.className = "modal-overlay";
+  o.innerHTML = `<div class="modal"><h3>从共享库删除「${name}」？</h3>
+    <p style="font-size:13px;color:var(--fg2);line-height:1.6">共享库中的此技能将移到 <code>.trash/</code>（可恢复）。<br>
+    所有引用此技能的 profile 将获得<b>独立副本</b>（不再共同进化）。</p>
+    <div class="modal-actions"><button class="btn cancel">取消</button><button class="btn confirm danger">从共享库删除</button></div></div>`;
+  document.body.appendChild(o);
+  o.querySelector(".cancel").onclick = () => o.remove();
+  o.querySelector(".confirm").onclick = async () => {
+    o.remove();
+    if (btn) { btn.classList.add("loading"); btn.disabled = true; }
+    try {
+      const d = await api("/api/skills/shared/delete","POST",{skill_name:name});
+      toast(d.message||`已从共享库删除 ${name}`,"success");
+      // 刷新共享库弹窗 + 主界面技能列表
+      delete state.skills[state.currentProfile]; delete state.skillContents[state.currentProfile];
+      await renderEditor();
+      // 重新加载共享库弹窗
+      showSharedLibraryModal();
+    } catch(e) {
+      if (btn) { btn.classList.remove("loading"); btn.disabled = false; }
+      toast("删除失败: "+e.message,"error");
+    }
+  };
 }
 
 // ── 分类批量操作 ──
@@ -2298,6 +2497,55 @@ async function batchExtractCategory(cat) {
       if (skip > 0) parts.push(`跳过 ${skip}（内容不同: ${skipped.join(", ")}）`);
       if (fail > 0) parts.push(`失败 ${fail}（${errs.join("; ")}）`);
       toast(parts.join("，"), skip > 0 && fail === 0 ? "info" : "error");
+    }
+  };
+}
+
+async function batchDeleteCategory(cat) {
+  if (!state.currentProfile) return;
+  const skills = (state.skills[state.currentProfile]||[]).filter(s => s.category === cat && s.source !== "builtin");
+  if (skills.length === 0) return;
+  const sharedCount = skills.filter(s => s.source === "shared").length;
+  const normalCount = skills.length - sharedCount;
+  const o = document.createElement("div"); o.className = "modal-overlay";
+  o.innerHTML = `<div class="modal"><h3>批量删除分类"${cat}"下的技能？</h3>
+    <p style="font-size:13px;color:var(--fg2);line-height:1.6">将删除以下 <b style="color:var(--red)">${skills.length}</b> 个技能：<br>
+    <code style="font-size:11px;color:var(--fg3);display:block;margin:8px 0;max-height:80px;overflow-y:auto">${skills.map(s => `[${s.source}] ${s.name}`).join(", ")}</code>
+    ${sharedCount > 0 ? `<br><b style="color:var(--yellow)">共享技能</b>（${sharedCount} 个）：仅删除当前 profile 的 junction，共享库内容不受影响。<br>` : ""}
+    ${normalCount > 0 ? `<br><b style="color:var(--fg)">非共享技能</b>（${normalCount} 个）：直接删除，不可恢复。` : ""}</p>
+    <div class="modal-actions"><button class="btn cancel">取消</button><button class="btn confirm danger">全部删除</button></div></div>`;
+  document.body.appendChild(o);
+  o.querySelector(".cancel").onclick = () => o.remove();
+  o.querySelector(".confirm").onclick = async () => {
+    o.remove();
+    let ok = 0, fail = 0;
+    const errs = [];
+    let catJunctionDeleted = false;
+    showBlockingLoader("正在删除技能...", `0 / ${skills.length}`);
+    for (let i = 0; i < skills.length; i++) {
+      const s = skills[i];
+      if (catJunctionDeleted) { ok++; continue; }
+      updateBlockingLoader(`正在删除: ${s.name}`, `${i + 1} / ${skills.length}`);
+      try {
+        const d = await api(`/api/profile/${state.currentProfile}/skills/${s.name}`, "DELETE");
+        ok++;
+        if (d.category_junction) catJunctionDeleted = true;
+      } catch(e) {
+        if (catJunctionDeleted) { ok++; continue; }
+        fail++; errs.push(`${s.name}: ${e.message}`);
+      }
+    }
+    hideBlockingLoader();
+    state.currentSkill = null;
+    delete state.skills[state.currentProfile]; delete state.skillContents[state.currentProfile];
+    await renderEditor();
+    if (fail === 0) {
+      if (catJunctionDeleted) toast(`已删除分类"${cat}"的共享引用（共享库内容未删除）`, "success");
+      else toast(`已删除 ${ok} 个技能` + (sharedCount > 0 ? `（其中 ${sharedCount} 个仅删除引用）` : ""), "success");
+    } else {
+      const parts = [`成功 ${ok}`];
+      if (fail > 0) parts.push(`失败 ${fail}（${errs.join("; ")}）`);
+      toast(parts.join("，"), "error");
     }
   };
 }
