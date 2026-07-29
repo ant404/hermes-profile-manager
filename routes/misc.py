@@ -2,14 +2,19 @@ from ._base import *
 from urllib.parse import urlparse
 import urllib.request as _urlreq
 import urllib.error as _urlerr
+from flask import current_app
 
 bp = Blueprint("misc", __name__)
 
 
+def _app_root():
+    """应用根目录：dev 模式 = 项目根，PyInstaller 模式 = _MEIPASS（含 static/index.html）"""
+    return current_app.root_path
+
+
 @bp.route("/")
 def index():
-    # 用绝对路径，避免 PyInstaller exe 运行时 cwd 不在项目目录导致 404
-    return send_from_directory(get_app_dir(), "index.html")
+    return send_from_directory(_app_root(), "index.html")
 
 
 @bp.route("/api/info")

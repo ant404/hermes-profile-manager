@@ -20,6 +20,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ("index.html", "."),
+        ("static", "static"),
         ("icon.ico", "."),
         ("icon.png", "."),
         ("icon_256.png", "."),
