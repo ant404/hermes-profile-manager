@@ -1247,6 +1247,14 @@ function renderSkillsSubview() {
       <div class="skills-sidebar" id="skills-sidebar">
         <div class="skills-sidebar-header"><span>${enabledCnt}/${skills.length} Skills</span><span style="font-size:10px;color:var(--fg3);text-transform:none;letter-spacing:0;font-weight:400">内置 ${builtinCnt} + 用户 ${userCnt} + 自定义 ${customCnt} + 共享 ${sharedCnt}${disabledCnt?` + 禁用 ${disabledCnt}`:''}</span></div>
         <div class="skills-search"><input id="skill-search" placeholder="搜索 skill..." oninput="filterSkills()"></div>
+        <div id="skills-filter-bar" style="display:flex;gap:4px;padding:4px 8px;flex-wrap:wrap">
+          <button class="source-filter-btn active" data-filter="all" onclick="setSourceFilter('all',this)" style="font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--fg2);cursor:pointer">全部</button>
+          <button class="source-filter-btn" data-filter="shared" onclick="setSourceFilter('shared',this)" style="font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--fg2);cursor:pointer">共享</button>
+          <button class="source-filter-btn" data-filter="custom" onclick="setSourceFilter('custom',this)" style="font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--fg2);cursor:pointer">自定义</button>
+          <button class="source-filter-btn" data-filter="user" onclick="setSourceFilter('user',this)" style="font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--fg2);cursor:pointer">内置→用户</button>
+          <button class="source-filter-btn" data-filter="builtin" onclick="setSourceFilter('builtin',this)" style="font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--fg2);cursor:pointer">内置</button>
+          <button class="source-filter-btn" data-filter="disabled" onclick="setSourceFilter('disabled',this)" style="font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--fg2);cursor:pointer">已禁用</button>
+        </div>
         <div class="skills-list" id="skills-list"></div>
       </div>
       <div class="sidebar-resizer" id="sidebar-resizer" title="拖拽调整面板宽度"></div>
@@ -1615,7 +1623,13 @@ async function deleteSource(sid) {
 function renderSkillsList() {
   const el = document.getElementById("skills-list"); if (!el) return;
   const search = (document.getElementById("skill-search")?.value || "").toLowerCase();
-  const skills = (state.skills[state.currentProfile]||[]).filter(s => !search || s.name.toLowerCase().includes(search) || (s.description||"").toLowerCase().includes(search) || (s.category||"").toLowerCase().includes(search));
+  const srcFilter = state.sourceFilter || "all";
+  const skills = (state.skills[state.currentProfile]||[]).filter(s => {
+    if (search && !s.name.toLowerCase().includes(search) && !(s.description||"").toLowerCase().includes(search) && !(s.category||"").toLowerCase().includes(search)) return false;
+    if (srcFilter === "all") return true;
+    if (srcFilter === "disabled") return s.enabled === false;
+    return s.source === srcFilter;
+  });
   el.innerHTML = "";
   // 共享技能批量操作栏（勾选共享技能后显示）
   const selBar = document.createElement("div");
@@ -1703,6 +1717,15 @@ function renderSkillsList() {
   });
 }
 function filterSkills() { renderSkillsList(); }
+
+// ── 来源过滤 ──
+state.sourceFilter = "all";
+function setSourceFilter(filter, btn) {
+  state.sourceFilter = filter;
+  document.querySelectorAll(".source-filter-btn").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  renderSkillsList();
+}
 async function toggleSkillState(skillName, enabled) {
   try {
     await api(`/api/profile/${state.currentProfile}/skills/${skillName}/state`, "PUT", {enabled});
@@ -2242,17 +2265,23 @@ async function batchUnlinkCategory(cat) {
 function updateSharedSelectionBar() {
   const bar = document.getElementById("shared-selection-bar");
   if (!bar) return;
-  const checked = [...document.querySelectorAll(".shared-select:checked")];
+  const allShared = [...document.querySelectorAll(".shared-select")];
+  const checked = allShared.filter(c => c.checked);
   const names = checked.map(c => c.dataset.skill);
-  if (names.length === 0) {
-    bar.style.display = "none";
-    bar.innerHTML = "";
-    return;
+  const totalShared = allShared.length;
+  if (totalShared === 0) {
+    bar.style.display = "none"; bar.innerHTML = ""; return;
   }
   bar.style.display = "flex";
-  bar.innerHTML = `<span style="color:var(--yellow);font-weight:600">已选 ${names.length} 个共享技能</span>
-    <button class="btn" style="height:24px;padding:0 10px;font-size:11px" onclick="batchUnlinkSelected()">解除所选共享</button>
-    <button class="btn ghost" style="height:24px;padding:0 10px;font-size:11px" onclick="clearSharedSelection()">取消选择</button>`;
+  const allChecked = checked.length === totalShared;
+  bar.innerHTML = `<span style="color:var(--yellow);font-weight:600;font-size:11px">${names.length > 0 ? `已选 ${names.length}/${totalShared}` : `共 ${totalShared} 个共享`}</span>
+    <button class="btn ghost" style="height:22px;padding:0 8px;font-size:10px" onclick="${allChecked ? 'clearSharedSelection()' : 'selectAllShared()'}">${allChecked ? '全不选' : '全选共享'}</button>
+    ${names.length > 0 ? `<button class="btn" style="height:22px;padding:0 8px;font-size:10px" onclick="batchUnlinkSelected()">解除所选(${names.length})</button>` : ''}
+    ${names.length > 0 ? `<button class="btn ghost" style="height:22px;padding:0 8px;font-size:10px" onclick="clearSharedSelection()">取消选择</button>` : ''}`;
+}
+function selectAllShared() {
+  document.querySelectorAll(".shared-select").forEach(c => c.checked = true);
+  updateSharedSelectionBar();
 }
 function clearSharedSelection() {
   document.querySelectorAll(".shared-select:checked").forEach(c => c.checked = false);
