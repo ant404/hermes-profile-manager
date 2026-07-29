@@ -162,3 +162,58 @@ def api_discover_models(profile_name, cp_index):
         return jsonify({"error": f"连接失败: {e.reason}", "url": models_url}), 502
     except Exception as e:
         return jsonify({"error": str(e), "url": models_url}), 500
+
+
+@bp.route("/api/profile/<profile_name>/diff/<file_key>", methods=["POST"])
+def api_file_diff(profile_name, file_key):
+    """保存前 diff 预览：对比提交内容与磁盘内容，返回 unified diff。
+    body: {content: str}
+    支持两种 file_key:
+      1. 标准 profile 文件: config.yaml / .env / SOUL.md / MEMORY.md / USER.md
+      2. skill 文件: skills/<skill_name>/<file_name>（如 skills/my-skill/SKILL.md）"""
+    import difflib
+    if profile_name not in get_profile_names():
+        return jsonify({"error": "profile not found"}), 404
+    # 解析 file_key：标准文件 或 skill 文件
+    if file_key.startswith("skills/"):
+        parts = file_key.split("/", 2)  # ["skills", "<skill_name>", "<file_name>"]
+        if len(parts) < 3 or not parts[1] or not parts[2]:
+            return jsonify({"error": "invalid skill file key (format: skills/<skill>/<file>)"}), 400
+        skill_name, file_name = parts[1], parts[2]
+        # 安全检查：skill_name 中不应含路径穿越
+        if ".." in skill_name or "/" in skill_name or "\\" in skill_name:
+            return jsonify({"error": "invalid skill name"}), 400
+        if ".." in file_name or "/" in file_name or "\\" in file_name:
+            return jsonify({"error": "invalid file name"}), 400
+        skills_dir = get_skills_dir(profile_name)
+        file_path = skills_dir / skill_name / file_name
+    else:
+        file_path = get_file_path(profile_name, file_key)
+        if not file_path:
+            return jsonify({"error": "invalid file key"}), 400
+    data = request.get_json() or {}
+    new_content = data.get("content", "")
+    # 磁盘现状（可能不存在 → 视为空）
+    disk_content = ""
+    if file_path.exists():
+        try:
+            disk_content = file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return jsonify({"error": f"读取磁盘文件失败: {e}"}), 500
+    old_lines = disk_content.splitlines(keepends=True)
+    new_lines = new_content.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"磁盘/{file_key}", tofile=f"当前编辑/{file_key}", lineterm="",
+    ))
+    # 统计增删行数（排除 diff 头 +++/---/@@）
+    added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
+    removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+    return jsonify({
+        "ok": True,
+        "changed": added > 0 or removed > 0,
+        "added": added,
+        "removed": removed,
+        "diff": "".join(l if l.endswith("\n") else l + "\n" for l in diff),
+        "disk_signature": get_file_signature(file_path),
+    })

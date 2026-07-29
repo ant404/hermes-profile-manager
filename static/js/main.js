@@ -1018,14 +1018,31 @@ function renderConfigRaw(container) {
 async function saveConfigRaw() {
   const btn = document.getElementById("btn-save-raw");
   await withLoading(btn, async () => {
-    await api(`/api/profile/${state.currentProfile}/config/raw`, "PUT", {content: state.configRawContent});
-    state.configRawOriginal = state.configRawContent;
-    const b = document.getElementById("btn-save-raw"); if (b) b.disabled = true;
-    // reload structured data
-    delete state.configData[state.currentProfile]; delete state.configOriginal[state.currentProfile];
-    toast("config.yaml (原始) 保存成功~","success");
-    renderFileTabs();
+    await confirmDiffSave("config.yaml", state.configRawContent, async () => {
+      await api(`/api/profile/${state.currentProfile}/config/raw`, "PUT", {content: state.configRawContent});
+      state.configRawOriginal = state.configRawContent;
+      const b = document.getElementById("btn-save-raw"); if (b) b.disabled = true;
+      // reload structured data
+      delete state.configData[state.currentProfile]; delete state.configOriginal[state.currentProfile];
+      toast("config.yaml (原始) 保存成功~","success");
+      renderFileTabs();
+    });
   }).catch(e => toast("保存失败: "+e.message,"error"));
+}
+
+// ── config raw mode ──
+function setConfigMode(mode) {
+  state.configMode = mode;
+  const fc = document.getElementById("file-content"); if (!fc) return;
+  if (mode === "raw") {
+    // load raw content
+    api(`/api/profile/${state.currentProfile}/config/raw`).then(d => {
+      state.configRawContent = d.content; state.configRawOriginal = d.content;
+      renderConfigRaw(fc);
+    }).catch(e => toast("加载原始内容失败: "+e.message,"error"));
+  } else {
+    loadConfigView(fc);
+  }
 }
 
 // ── .env 结构化视图 ──
@@ -1153,11 +1170,13 @@ function renderEnvRaw(container) {
 async function saveEnvRaw() {
   const btn = document.getElementById("btn-save-env-raw");
   await withLoading(btn, async () => {
-    await api(`/api/profile/${state.currentProfile}/.env`, "PUT", {content: state.envRawContent});
-    state.envRawOriginal = state.envRawContent;
-    const b = document.getElementById("btn-save-env-raw"); if(b) b.disabled = true;
-    delete state.envData[state.currentProfile]; delete state.envOriginal[state.currentProfile];
-    toast(".env (原始) 保存成功~","success"); renderFileTabs();
+    await confirmDiffSave(".env", state.envRawContent, async () => {
+      await api(`/api/profile/${state.currentProfile}/.env`, "PUT", {content: state.envRawContent});
+      state.envRawOriginal = state.envRawContent;
+      const b = document.getElementById("btn-save-env-raw"); if(b) b.disabled = true;
+      delete state.envData[state.currentProfile]; delete state.envOriginal[state.currentProfile];
+      toast(".env (原始) 保存成功~","success"); renderFileTabs();
+    });
   }).catch(e => toast("保存失败: "+e.message,"error"));
 }
 
@@ -1776,12 +1795,15 @@ async function saveSkillFile() {
   const content = state.skillContents[state.currentProfile][state.currentSkill][state.currentSkillFile];
   const btn = document.getElementById("btn-save-skill");
   await withLoading(btn, async () => {
-    await api(`/api/profile/${state.currentProfile}/skills/${state.currentSkill}/${state.currentSkillFile}`, "PUT", {content});
-    state.skillOriginals[state.currentProfile][state.currentSkill][state.currentSkillFile] = content;
-    updateSkillSaveButton();
-    const skill = (state.skills[state.currentProfile]||[]).find(s => s.name === state.currentSkill);
-    if (skill) renderSkillFileBar(["SKILL.md", ...skill.sub_files]);
-    toast("Skill 保存成功~","success");
+    const fileKey = `skills/${state.currentSkill}/${state.currentSkillFile}`;
+    await confirmDiffSave(fileKey, content, async () => {
+      await api(`/api/profile/${state.currentProfile}/skills/${state.currentSkill}/${state.currentSkillFile}`, "PUT", {content});
+      state.skillOriginals[state.currentProfile][state.currentSkill][state.currentSkillFile] = content;
+      updateSkillSaveButton();
+      const skill = (state.skills[state.currentProfile]||[]).find(s => s.name === state.currentSkill);
+      if (skill) renderSkillFileBar(["SKILL.md", ...skill.sub_files]);
+      toast("Skill 保存成功~","success");
+    });
   }).catch(e => toast("保存失败: "+e.message,"error"));
 }
 async function copySkillFrom() {
@@ -2265,6 +2287,44 @@ async function batchUnlinkSelected() {
     } catch(e) { o.remove(); toast("批量解除失败: "+e.message,"error"); }
   };
 }
+
+// ── 保存前 diff 预览 ──
+// 保存 raw 文本前先对比磁盘内容，有差异时弹窗展示 unified diff 让用户确认。
+// file_key: "config.yaml" | ".env" | "skills/<skill>/<file>"
+async function confirmDiffSave(file_key, content, onConfirm) {
+  const profile = state.currentProfile;
+  if (!profile) { onConfirm(); return; }  // 无 profile → 跳过预览
+  try {
+    const d = await api(`/api/profile/${profile}/diff/${file_key}`, "POST", { content });
+    if (!d.changed) { onConfirm(); return; }  // 无变化 → 直接保存
+    // 显示 diff 弹窗
+    const o = document.createElement("div"); o.className = "modal-overlay";
+    const diffLines = d.diff.split("\n").map(l => {
+      let cls = "", sym = "";
+      if (l.startsWith("@@")) { cls = "color:var(--accent2);"; sym = " "; }
+      else if (l.startsWith("+")) { cls = "color:var(--green);background:rgba(0,255,0,0.05);"; sym = "+"; }
+      else if (l.startsWith("-")) { cls = "color:var(--red);background:rgba(255,0,0,0.05);"; sym = "-"; }
+      else if (l.startsWith("---") || l.startsWith("+++")) { cls = "color:var(--fg3);font-weight:600;"; sym = " "; }
+      else { cls = "color:var(--fg2);"; sym = " "; }
+      return `<div style="white-space:pre;font-family:Consolas,monospace;font-size:11px;line-height:1.5;padding:0 6px;${cls}">${sym} ${escHtml(l)}</div>`;
+    }).join("");
+    o.innerHTML = `<div class="modal" style="max-width:700px;max-height:80vh;display:flex;flex-direction:column">
+      <h3>📝 变更预览 — ${escHtml(file_key)}</h3>
+      <p style="font-size:12px;color:var(--fg3);margin-bottom:8px">
+        <span style="color:var(--green)">+${d.added} 行</span> &nbsp;
+        <span style="color:var(--red)">-${d.removed} 行</span>
+      </p>
+      <div style="overflow-y:auto;flex:1;max-height:55vh;border:1px solid var(--border);border-radius:6px;background:var(--bg);padding:4px 0">${diffLines}</div>
+      <div class="modal-actions" style="margin-top:12px">
+        <button class="btn cancel">取消</button>
+        <button class="btn confirm">确认保存</button>
+      </div></div>`;
+    document.body.appendChild(o);
+    o.querySelector(".cancel").onclick = () => o.remove();
+    o.querySelector(".confirm").onclick = () => { o.remove(); onConfirm(); };
+  } catch(e) { toast("diff 检查失败: "+e.message, "warn"); onConfirm(); }  // 降级：直接保存
+}
+function escHtml(s) { const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
 
 // ── 一键抽取当前 profile 技能（按来源类型勾选 + 冲突预选项）──
 async function batchExtractAll() {
