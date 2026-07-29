@@ -40,14 +40,34 @@ def atomic_write_text(path, content, encoding="utf-8"):
         raise
 
 
-def make_backup(path):
-    """备份文件到 .backups/。返回警告字符串（失败时）或 None（成功/文件不存在）。
+def make_backup(path, profile_hint=None):
+    """备份文件到 AAAHermesHub/backups/incremental/<profile>/。
+    profile_hint: 可选，用于确定 backup 子目录名（如 "default" / "coder"）。
     备份失败不阻止保存：原子写入本身已防止文件损坏，备份只是"可撤销"的便利。"""
     if not path.exists():
         return None
     try:
-        backup_dir = path.parent / ".backups"
-        backup_dir.mkdir(exist_ok=True)
+        from .paths import get_profile_names, get_profile_path
+        # 推断 profile 名：按路径长度降序排列（避免 default/HERMES_HOME 先于 profiles/xxx 匹配）
+        if profile_hint is None:
+            profile_hint = "unknown"
+            pns = sorted(get_profile_names(), key=lambda n: len(str(get_profile_path(n))), reverse=True)
+            for pn in pns:
+                pp = str(get_profile_path(pn))
+                if str(path).startswith(pp):
+                    profile_hint = pn
+                    break
+        # 备份目标：AAAHermesHub/backups/incremental/<profile>/<relpath>/
+        from .paths import HUB_DIR
+        incremental_root = HUB_DIR / "backups" / "incremental" / profile_hint
+        # 保持源文件相对 profile 目录的路径结构
+        pp = get_profile_path(profile_hint) if profile_hint != "unknown" else Path(path).parent
+        try:
+            rel = Path(path).resolve().relative_to(pp.resolve())
+        except ValueError:
+            rel = Path(path).name  # fallback: 只用文件名
+        backup_dir = incremental_root / rel.parent
+        backup_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_name = f"{path.stem}_{ts}{path.suffix if path.suffix else '.bak'}"
         shutil.copy2(path, backup_dir / backup_name)

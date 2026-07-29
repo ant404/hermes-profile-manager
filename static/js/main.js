@@ -6,7 +6,7 @@ let state = {
   wrapMode: true,
   // structured config
   configData: {}, configOriginal: {}, configSchema: [],
-  configMode: "form", // "form" or "raw"
+  configMode: "raw", // 始终原始编辑
   configRawContent: "", configRawOriginal: "",
   // structured env
   envData: [], envOriginal: [],
@@ -269,7 +269,7 @@ async function selectProfile(name, skipRender) {
   if (name !== state.currentProfile && state.currentProfile) {
     const doSwitch = async () => {
       state.currentProfile = name; state.currentView = "files"; state.currentFile = "config.yaml";
-      state.configMode = "form"; state.envMode = "form";
+      state.configMode = "raw"; state.envMode = "form";
       delete state.fileContents[name]; delete state.originalContents[name];
       delete state.configData[name]; delete state.configOriginal[name];
       delete state.envData[name]; delete state.envOriginal[name];
@@ -1013,15 +1013,14 @@ function setConfigMode(mode) {
 function renderConfigRaw(container) {
   container.innerHTML = `
     <div class="raw-toolbar">
-      <span class="path">config.yaml (原始编辑 - 高级模式)</span>
-      <div class="mode-switch"><button onclick="setConfigMode('form')">表单</button><button class="active" onclick="setConfigMode('raw')">原始</button></div>
+      <span class="path">config.yaml</span>
     </div>
     <div class="raw-wrap">
       <div class="line-numbers" id="line-numbers"></div>
       <div class="textarea-wrap"><textarea id="editor" spellcheck="false"></textarea></div>
     </div>
     <div class="save-bar">
-      <span class="info">高级模式: 直接编辑原始 YAML，注意不要破坏格式</span>
+      <span class="info">直接编辑 YAML · Ctrl+S 保存</span>
       <button class="btn save" onclick="saveConfigRaw()" id="btn-save-raw" ${state.configRawContent===state.configRawOriginal?"disabled":""}>保存</button>
     </div>
   `;
