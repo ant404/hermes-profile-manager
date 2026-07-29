@@ -29,3 +29,6 @@ Desktop.ini
 
 # Hermes local state
 .hermes_theme
+
+# Runtime data (logs, hub, shared-skills, trash)
+AAAHermesHub/
