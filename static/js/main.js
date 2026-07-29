@@ -165,7 +165,7 @@ async function init() {
       // 根据当前上下文触发对应保存
       if (state.currentView === "skills" && state.currentSkill) {
         saveSkillFile();
-      } else if (state.configMode === "raw" && state.currentFile === "config.yaml") {
+      } else if (state.currentFile === "config.yaml") {
         saveConfigRaw();
       } else if (state.envMode === "raw" && state.currentFile === ".env") {
         saveEnvRaw();
@@ -273,6 +273,7 @@ async function selectProfile(name, skipRender) {
       delete state.fileContents[name]; delete state.originalContents[name];
       delete state.configData[name]; delete state.configOriginal[name];
       delete state.envData[name]; delete state.envOriginal[name];
+      state.configRawContent = ""; state.configRawOriginal = "";
       renderSidebar();
       await renderEditor();
     };
@@ -281,11 +282,12 @@ async function selectProfile(name, skipRender) {
     return;
   }
   state.currentProfile = name; state.currentView = "files"; state.currentFile = "config.yaml";
-  state.configMode = "form"; state.envMode = "form";
+  state.configMode = "raw"; state.envMode = "form";
   // reset caches
   delete state.fileContents[name]; delete state.originalContents[name];
   delete state.configData[name]; delete state.configOriginal[name];
   delete state.envData[name]; delete state.envOriginal[name];
+  state.configRawContent = ""; state.configRawOriginal = "";
   renderSidebar();
   await renderEditor();
 }
@@ -322,10 +324,9 @@ async function renderEditor() {
 function hasUnsavedChanges() {
   if (!state.currentProfile) return false;
   const _dbg = (tag, val) => { if (val) console.warn("[hasUnsavedChanges] triggered:", tag); return val; };
-  // config.yaml
+  // config.yaml（始终 raw）
   if (state.currentFile === "config.yaml" || state.currentView !== "files") {
-    if (_dbg("config.raw", state.configMode === "raw" && state.configRawContent !== state.configRawOriginal)) return true;
-    if (_dbg("config.form", isConfigModified())) return true;
+    if (_dbg("config.raw", state.configRawContent !== state.configRawOriginal)) return true;
   }
   // .env
   if (state.currentFile === ".env" || state.currentView !== "files") {
@@ -366,9 +367,9 @@ function guardSwitch(action, label) {
 }
 
 async function saveAllCurrent() {
-  // save everything that's modified
-  if (isConfigModified()) await saveConfig();
-  if (state.configMode === "raw" && state.configRawContent !== state.configRawOriginal) await saveConfigRaw();
+  // config 始终 raw
+  if (state.configRawContent !== state.configRawOriginal) await saveConfigRaw();
+  // .env
   if (isEnvModified()) await saveEnv();
   if (state.envMode === "raw" && state.envRawContent !== state.envRawOriginal) await saveEnvRaw();
   for (const fk of ["SOUL.md","MEMORY.md","USER.md"]) {
@@ -485,16 +486,15 @@ async function saveMdFile() {
 
 // ── config.yaml 结构化视图 ──
 async function loadConfigView(container) {
-  // load structured config
-  if (!state.configData[state.currentProfile]) {
+  // 始终加载 raw 内容
+  if (!state.configRawContent) {
     try {
-      const d = await api(`/api/profile/${state.currentProfile}/config`);
-      state.configData[state.currentProfile] = {values: d.values, custom_providers: d.custom_providers, mcp_servers: d.mcp_servers || []};
-      state.configOriginal[state.currentProfile] = JSON.parse(JSON.stringify({values: d.values, custom_providers: d.custom_providers, mcp_servers: d.mcp_servers || []}));
+      const d = await api(`/api/profile/${state.currentProfile}/config/raw`);
+      state.configRawContent = d.content;
+      state.configRawOriginal = d.content;
     } catch(e) { toast("加载 config 失败: "+e.message,"error"); return; }
   }
-  if (state.configMode === "form") renderConfigForm(container);
-  else renderConfigRaw(container);
+  renderConfigRaw(container);
 }
 
 function renderConfigForm(container) {
