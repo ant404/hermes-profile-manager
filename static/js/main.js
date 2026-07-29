@@ -158,6 +158,22 @@ async function init() {
   await loadConfigSchema();
   loadBackups();  // 异步加载备份列表，不阻塞启动
   startPolling();
+  // 全局键盘快捷键
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+      e.preventDefault();
+      // 根据当前上下文触发对应保存
+      if (state.currentView === "skills" && state.currentSkill) {
+        saveSkillFile();
+      } else if (state.configMode === "raw" && state.currentFile === "config.yaml") {
+        saveConfigRaw();
+      } else if (state.envMode === "raw" && state.currentFile === ".env") {
+        saveEnvRaw();
+      } else {
+        saveAllCurrent();
+      }
+    }
+  });
 }
 
 async function loadInfo() {

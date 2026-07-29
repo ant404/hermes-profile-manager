@@ -5,6 +5,9 @@ bp = Blueprint("profiles", __name__)
 
 @bp.route("/api/profiles")
 def api_profiles():
+    thin = request.args.get("thin", "").lower() in ("1", "true", "yes")
+    # 基于所有 profile 文件的签名计算 ETag（纯 mtime+size，极快）
+    etag_parts = []
     profiles = []
     for name in get_profile_names():
         files = {}
@@ -18,15 +21,24 @@ def api_profiles():
                 "lang": info["lang"],
                 "sub": info["sub"],
             }
-        # skill 数量（user + builtin，与 skills 列表口径一致）
-        skill_count = len(list_skills(name))
-        # 工具集 + MCP 统计
-        toolset_total, toolset_enabled = _count_toolsets(name)
-        mcp_count = _count_mcp(name)
+            if sig:
+                etag_parts.append(f"{name}:{fk}:{sig[0]}:{sig[1]}")
+        if not thin:
+            skill_count = len(list_skills(name))
+            toolset_total, toolset_enabled = _count_toolsets(name)
+            mcp_count = _count_mcp(name)
+        else:
+            skill_count = toolset_total = toolset_enabled = mcp_count = 0
         profiles.append({"name": name, "files": files, "skill_count": skill_count,
                           "toolset_total": toolset_total, "toolset_enabled": toolset_enabled,
                           "mcp_count": mcp_count})
-    return jsonify({"profiles": profiles})
+    # ETag: 哈希所有文件的 mtime+size，文件不变则 ETag 不变
+    etag = hashlib.md5("|".join(sorted(etag_parts)).encode()).hexdigest()
+    if request.headers.get("If-None-Match") == etag:
+        return "", 304
+    resp = jsonify({"profiles": profiles})
+    resp.headers["ETag"] = etag
+    return resp
 
 
 @bp.route("/api/profile/<profile_name>/<file_key>")
@@ -44,6 +56,7 @@ def api_read_file(profile_name, file_key):
         "path": str(fp),
         "exists": fp.exists(),
         "lang": PROFILE_FILES[file_key]["lang"],
+        "signature": list(get_file_signature(fp)) if fp.exists() else None,
     })
 
 
@@ -58,13 +71,25 @@ def api_save_file(profile_name, file_key):
     if not data or "content" not in data:
         return jsonify({"error": "missing content"}), 400
     content = data["content"]
+    # 冲突检测：客户端可传 signature 防止覆盖外部改动
+    client_sig = data.get("signature")
+    if client_sig is not None:
+        disk_sig = get_file_signature(fp)
+        if client_sig != (list(disk_sig) if disk_sig else None):
+            return jsonify({
+                "error": "conflict: file modified externally since last read",
+                "code": "conflict",
+                "disk_signature": list(disk_sig) if disk_sig else None,
+                "client_signature": client_sig,
+            }), 409
     try:
         warn = make_backup(fp)
         atomic_write_text(fp, content)
         key = f"{profile_name}:{file_key}"
-        _watch_state[key] = get_file_signature(fp)
+        new_sig = get_file_signature(fp)
+        _watch_state[key] = new_sig
         _log_operation("save_file", profile=profile_name, file=file_key, path=str(fp))
-        resp = {"ok": True, "path": str(fp)}
+        resp = {"ok": True, "path": str(fp), "signature": list(new_sig) if new_sig else None}
         if warn:
             resp["warning"] = warn
         return jsonify(resp)

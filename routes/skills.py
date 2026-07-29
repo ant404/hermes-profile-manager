@@ -37,6 +37,18 @@ def api_save_skill_file(profile_name, skill_name, file_path):
     data = request.get_json()
     if not data or "content" not in data:
         return jsonify({"error": "missing content"}), 400
+    # 冲突检测
+    client_sig = data.get("signature")
+    if client_sig is not None:
+        disk_path = _resolve_skill_dir(profile_name, skill_name)[0]
+        if disk_path:
+            disk_sig = get_file_signature(disk_path / file_path)
+            if client_sig != (list(disk_sig) if disk_sig else None):
+                return jsonify({
+                    "error": "conflict: file modified externally since last read",
+                    "code": "conflict",
+                    "disk_signature": list(disk_sig) if disk_sig else None,
+                }), 409
     err, warn = save_skill_file(profile_name, skill_name, file_path, data["content"])
     if err:
         _log_operation("save_skill", result="error", profile=profile_name, skill=skill_name, file=file_path, error=err)
