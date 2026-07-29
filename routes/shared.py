@@ -245,6 +245,56 @@ def api_shared_unlink():
     return jsonify({"ok": True, "message": f"已解除 '{skill_name}' 的共享，现为独立副本（修改不再影响其他 profile）"})
 
 
+@bp.route("/api/skills/shared/unlink-batch", methods=["POST"])
+def api_shared_unlink_batch():
+    """批量解除共享：对指定 profile 的多个 junction skill 批量执行 unlink。
+    每项独立容错（单个失败不中断整批），返回逐项成功/失败明细。
+    body: {profile, skill_names: [str, ...]}"""
+    data = request.get_json() or {}
+    profile = data.get("profile")
+    skill_names = data.get("skill_names") or []
+    if not profile or profile not in get_profile_names():
+        return jsonify({"error": "invalid profile"}), 400
+    if not isinstance(skill_names, list) or not skill_names:
+        return jsonify({"error": "skill_names 必须是非空数组"}), 400
+
+    succeeded, failed = [], []
+    for skill_name in skill_names:
+        if not _validate_skill_name(skill_name):
+            failed.append({"skill": skill_name, "error": "invalid skill name"})
+            continue
+        # 在 profile 中查找 junction（支持嵌套分类）
+        target, _ = _find_skill_dir_in(get_skills_dir(profile), skill_name)
+        if not target or not _is_junction(target):
+            failed.append({"skill": skill_name, "error": "该技能不是共享 junction"})
+            continue
+        # 在共享库中查找源
+        shared_dir, _ = _find_skill_dir_in(SHARED_SKILLS_DIR, skill_name)
+        if not shared_dir:
+            failed.append({"skill": skill_name, "error": "共享源不存在，无法复制独立副本"})
+            continue
+        try:
+            _remove_junction(str(target))
+            shutil.copytree(str(shared_dir), str(target))
+            succeeded.append(skill_name)
+        except Exception as e:
+            failed.append({"skill": skill_name, "error": str(e)})
+
+    _log_operation("unlink_shared_batch", profile=profile,
+                   succeeded=succeeded, succeeded_count=len(succeeded),
+                   failed_count=len(failed),
+                   detail=f"批量解除共享 {len(succeeded)}/{len(skill_names)} 成功")
+    return jsonify({
+        "ok": True,
+        "succeeded": succeeded,
+        "failed": failed,
+        "succeeded_count": len(succeeded),
+        "failed_count": len(failed),
+        "message": f"已批量解除 {len(succeeded)} 个技能的共享"
+                   + (f"，{len(failed)} 个失败" if failed else ""),
+    })
+
+
 @bp.route("/api/skills/shared/delete", methods=["POST"])
 def api_shared_delete():
     """从共享库删除 skill：移到 .trash（可恢复），并为所有引用的 profile 复制独立副本。

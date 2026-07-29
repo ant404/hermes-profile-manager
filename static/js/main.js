@@ -1598,6 +1598,11 @@ function renderSkillsList() {
   const search = (document.getElementById("skill-search")?.value || "").toLowerCase();
   const skills = (state.skills[state.currentProfile]||[]).filter(s => !search || s.name.toLowerCase().includes(search) || (s.description||"").toLowerCase().includes(search) || (s.category||"").toLowerCase().includes(search));
   el.innerHTML = "";
+  // 共享技能批量操作栏（勾选共享技能后显示）
+  const selBar = document.createElement("div");
+  selBar.id = "shared-selection-bar";
+  selBar.style.cssText = "display:none;align-items:center;gap:8px;padding:6px 8px;margin-bottom:6px;background:var(--yellow-dim);border:1px solid var(--yellow);border-radius:6px;font-size:12px";
+  el.appendChild(selBar);
   if (skills.length === 0) {
     el.innerHTML = '<div style="color:var(--fg3);text-align:center;padding:24px;font-size:12px">无匹配技能</div>';
     return;
@@ -1631,8 +1636,17 @@ function renderSkillsList() {
     // 启用/禁用开关
     const enabled = s.enabled !== false;
     const toggle = `<span class="skill-toggle ${enabled?"on":"off"}" data-skill="${s.name}" title="${enabled?"点击禁用":"点击启用"}">${enabled?"●":"○"}</span>`;
-    item.innerHTML = `<div class="sname">${toggle}${s.name}${srcTag}</div><div class="sdesc">${s.description||"(no description)"}</div><div class="smeta">${s.version?`<span>v${s.version}</span>`:''}<span>${s.sub_files.length} files</span><span>${s.modified}</span></div>`;
+    // 共享技能加 checkbox（用于跨分类批量解除共享）
+    const sharedChk = s.source === "shared"
+      ? `<input type="checkbox" class="shared-select" data-skill="${s.name}" title="勾选后可批量解除共享" style="margin-right:6px;accent-color:var(--yellow);cursor:pointer">`
+      : '';
+    item.innerHTML = `<div class="sname">${sharedChk}${toggle}${s.name}${srcTag}</div><div class="sdesc">${s.description||"(no description)"}</div><div class="smeta">${s.version?`<span>v${s.version}</span>`:''}<span>${s.sub_files.length} files</span><span>${s.modified}</span></div>`;
     item.onclick = (e) => {
+      if (e.target.classList.contains("shared-select")) {
+        e.stopPropagation();
+        updateSharedSelectionBar();
+        return;
+      }
       if (e.target.classList.contains("skill-toggle")) {
         e.stopPropagation();
         toggleSkillState(s.name, !enabled);
@@ -2184,19 +2198,71 @@ async function batchUnlinkCategory(cat) {
   o.querySelector(".confirm").onclick = async () => {
     const btn = o.querySelector(".confirm");
     btn.classList.add("loading");
-    let ok = 0, fail = 0;
-    const errs = [];
-    for (const s of skills) {
-      try {
-        await api("/api/skills/shared/unlink","POST",{profile:state.currentProfile,skill_name:s.name});
-        ok++;
-      } catch(e) { fail++; errs.push(`${s.name}: ${e.message}`); }
-    }
-    o.remove();
-    delete state.skills[state.currentProfile]; delete state.skillContents[state.currentProfile];
-    await renderEditor();
-    if (fail === 0) toast(`已解除 ${ok} 个技能的共享`,"success");
-    else toast(`成功 ${ok}，失败 ${fail}：${errs.join("; ")}`,"error");
+    try {
+      // 调用后端批量 unlink 路由（一次请求，统一服务端日志）
+      const d = await api("/api/skills/shared/unlink-batch","POST",{
+        profile: state.currentProfile,
+        skill_names: skills.map(s => s.name),
+      });
+      o.remove();
+      delete state.skills[state.currentProfile]; delete state.skillContents[state.currentProfile];
+      await renderEditor();
+      if (d.failed_count === 0) toast(d.message || `已解除 ${d.succeeded_count} 个技能的共享`,"success");
+      else {
+        const errs = (d.failed||[]).map(f => `${f.skill}: ${f.error}`).join("; ");
+        toast(`成功 ${d.succeeded_count}，失败 ${d.failed_count}：${errs}`,"error");
+      }
+    } catch(e) { o.remove(); toast("批量解除失败: "+e.message,"error"); }
+  };
+}
+
+// ── 共享技能 checkbox 多选 + 跨分类批量解除 ──
+function updateSharedSelectionBar() {
+  const bar = document.getElementById("shared-selection-bar");
+  if (!bar) return;
+  const checked = [...document.querySelectorAll(".shared-select:checked")];
+  const names = checked.map(c => c.dataset.skill);
+  if (names.length === 0) {
+    bar.style.display = "none";
+    bar.innerHTML = "";
+    return;
+  }
+  bar.style.display = "flex";
+  bar.innerHTML = `<span style="color:var(--yellow);font-weight:600">已选 ${names.length} 个共享技能</span>
+    <button class="btn" style="height:24px;padding:0 10px;font-size:11px" onclick="batchUnlinkSelected()">解除所选共享</button>
+    <button class="btn ghost" style="height:24px;padding:0 10px;font-size:11px" onclick="clearSharedSelection()">取消选择</button>`;
+}
+function clearSharedSelection() {
+  document.querySelectorAll(".shared-select:checked").forEach(c => c.checked = false);
+  updateSharedSelectionBar();
+}
+async function batchUnlinkSelected() {
+  if (!state.currentProfile) return;
+  const names = [...document.querySelectorAll(".shared-select:checked")].map(c => c.dataset.skill);
+  if (names.length === 0) return;
+  const o = document.createElement("div"); o.className = "modal-overlay";
+  o.innerHTML = `<div class="modal"><h3>批量解除 ${names.length} 个技能的共享？</h3>
+    <p style="font-size:13px;color:var(--fg2);line-height:1.6">将以下勾选的共享技能解除 junction，复制为独立副本（断开共同进化）：<br>
+    <code style="font-size:11px;color:var(--fg3)">${names.join(", ")}</code></p>
+    <div class="modal-actions"><button class="btn cancel">取消</button><button class="btn confirm">全部解除</button></div></div>`;
+  document.body.appendChild(o);
+  o.querySelector(".cancel").onclick = () => o.remove();
+  o.querySelector(".confirm").onclick = async () => {
+    const btn = o.querySelector(".confirm");
+    btn.classList.add("loading");
+    try {
+      const d = await api("/api/skills/shared/unlink-batch","POST",{
+        profile: state.currentProfile, skill_names: names,
+      });
+      o.remove();
+      delete state.skills[state.currentProfile]; delete state.skillContents[state.currentProfile];
+      await renderEditor();
+      if (d.failed_count === 0) toast(d.message || `已解除 ${d.succeeded_count} 个技能的共享`,"success");
+      else {
+        const errs = (d.failed||[]).map(f => `${f.skill}: ${f.error}`).join("; ");
+        toast(`成功 ${d.succeeded_count}，失败 ${d.failed_count}：${errs}`,"error");
+      }
+    } catch(e) { o.remove(); toast("批量解除失败: "+e.message,"error"); }
   };
 }
 
